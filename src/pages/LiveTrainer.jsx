@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate, useLocation } from 'react-router-dom';
-import { Camera, CameraOff, Volume2, VolumeX, Play, Pause, RotateCcw, AlertTriangle, ArrowRight, ShieldCheck, HelpCircle, Workflow, CheckCircle, ChevronDown, ChevronUp, Sparkles, Clock, Flame } from 'lucide-react';
+import { Camera, CameraOff, Volume2, VolumeX, Play, Pause, RotateCcw, AlertTriangle, ArrowRight, ShieldCheck, HelpCircle, Workflow, CheckCircle, ChevronDown, ChevronUp, Sparkles, Clock, Flame, X } from 'lucide-react';
 import Card from '../components/ui/Card';
 import Badge from '../components/ui/Badge';
 import { yogaPoses } from '../data/yogaData';
@@ -223,6 +223,11 @@ export default function LiveTrainer() {
   const [expandedInsights, setExpandedInsights] = useState({}); // { [joint]: explanation }
   const [loadingInsights, setLoadingInsights] = useState({}); // { [joint]: boolean }
 
+  // Auto-Capture States
+  const [captureCountdown, setCaptureCountdown] = useState(null);
+  const [capturedAnalysis, setCapturedAnalysis] = useState(null);
+  const [isCapturing, setIsCapturing] = useState(false);
+
   const handleToggleInsight = async (jointName) => {
     if (expandedInsights[jointName]) {
       setExpandedInsights(prev => ({ ...prev, [jointName]: null }));
@@ -243,6 +248,77 @@ export default function LiveTrainer() {
       setExpandedInsights(prev => ({ ...prev, [jointName]: "Error communicating with AI coach." }));
     } finally {
       setLoadingInsights(prev => ({ ...prev, [jointName]: false }));
+    }
+  };
+
+  const startAutoCapture = () => {
+    if (isCapturing) return;
+    setIsCapturing(true);
+    setCaptureCountdown(5);
+    speakFeedback("Starting auto-capture countdown. 5 seconds.");
+
+    let count = 5;
+    const interval = setInterval(() => {
+      count -= 1;
+      if (count > 0) {
+        setCaptureCountdown(count);
+        speakFeedback(count.toString());
+      } else {
+        clearInterval(interval);
+        setCaptureCountdown(0);
+        speakFeedback("Capturing!");
+        setTimeout(() => {
+          triggerCaptureAnalysis();
+          setIsCapturing(false);
+          setCaptureCountdown(null);
+        }, 300);
+      }
+    }, 1000);
+  };
+
+  const triggerCaptureAnalysis = async () => {
+    const lms = currentLandmarks;
+    if (!lms) {
+      alert("No pose landmarks detected from the camera. Please make sure the camera is active and tracking your body.");
+      return;
+    }
+
+    let capturedPhotoUrl = null;
+    const video = videoRef.current;
+    if (video && cameraActive) {
+      try {
+        const canvas = document.createElement('canvas');
+        canvas.width = video.videoWidth || 640;
+        canvas.height = video.videoHeight || 480;
+        const ctx = canvas.getContext('2d');
+        ctx.translate(canvas.width, 0);
+        ctx.scale(-1, 1);
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+        capturedPhotoUrl = canvas.toDataURL('image/jpeg');
+      } catch (err) {
+        console.warn("Failed to capture video snapshot", err);
+      }
+    }
+
+    try {
+      setFeedbackMsg("Analyzing captured posture...");
+      const response = await api.analyzePose(currentPose.id, lms, sessionId);
+      if (response) {
+        setCapturedAnalysis({
+          poseName: currentPose.id === 'auto-detect' ? (detectedPose?.name || 'Detected Pose') : currentPose.name,
+          accuracy: response.accuracy,
+          feedback: response.feedback,
+          jointDetails: response.joint_details,
+          tiltAngle: response.tilt_angle,
+          capturedLandmarks: lms,
+          photoUrl: capturedPhotoUrl
+        });
+        speakFeedback(`Capture complete. Pose accuracy: ${response.accuracy} percent.`);
+      }
+    } catch (e) {
+      console.error("Failed to analyze captured pose:", e);
+      setFeedbackMsg("Failed to analyze captured pose.");
+      alert("Error calling the analysis API: " + e.message);
     }
   };
 
@@ -1479,6 +1555,18 @@ export default function LiveTrainer() {
             {isSessionRunning && (
               <div className="absolute left-0 right-0 h-[2.5px] bg-indigo-500/50 shadow-[0_0_12px_rgba(99,102,241,0.8)] pointer-events-none z-15 hud-scanner-bar" style={{ width: '100%' }} />
             )}
+
+            {/* Countdown Overlay */}
+            {isCapturing && captureCountdown !== null && (
+              <div className="absolute inset-0 z-30 flex flex-col items-center justify-center bg-slate-950/70 backdrop-blur-sm">
+                <div className="text-8xl font-black bg-gradient-to-r from-indigo-400 to-violet-400 bg-clip-text text-transparent animate-bounce">
+                  {captureCountdown}
+                </div>
+                <p className="text-sm font-bold text-slate-300 uppercase tracking-widest mt-4">
+                  Hold your pose! Capturing in {captureCountdown}...
+                </p>
+              </div>
+            )}
             
             {/* Skeletal tracking overlay grid */}
             <svg className="absolute inset-0 w-full h-full z-10" viewBox="0 0 300 300" preserveAspectRatio="xMidYMid meet">
@@ -1902,17 +1990,23 @@ export default function LiveTrainer() {
 
                   <button
                     onClick={activeFlow ? handleFinishFlowSession : handleFinishSession}
-                    disabled={elapsedTime === 0}
-                    className={`flex items-center justify-center gap-1.5 rounded-xl py-2.5 text-xs font-semibold transition-all border ${
-                      elapsedTime > 0
-                        ? 'bg-emerald-600/10 border-emerald-500/20 text-emerald-400 hover:bg-emerald-500/20'
-                        : 'bg-slate-950 border-white/5 text-slate-700 cursor-not-allowed'
-                    }`}
+                    className="flex items-center justify-center gap-1.5 rounded-xl py-2.5 text-xs font-semibold transition-all border bg-emerald-600/10 border-emerald-500/20 text-emerald-400 hover:bg-emerald-500/20"
                   >
                     Finish
                     <ArrowRight className="h-3.5 w-3.5" />
                   </button>
                 </div>
+
+                <button
+                  onClick={startAutoCapture}
+                  disabled={!cameraActive || isCapturing}
+                  className={`w-full mt-3 flex items-center justify-center gap-1.5 rounded-xl py-2.5 text-xs font-semibold transition-all bg-violet-600 hover:bg-violet-500 text-white ${
+                    (!cameraActive || isCapturing) ? 'opacity-50 cursor-not-allowed' : ''
+                  }`}
+                >
+                  <Camera className="h-3.5 w-3.5" />
+                  Auto-Capture (5s Timer)
+                </button>
 
                 {/* Faults List */}
                 {(() => {
@@ -2143,6 +2237,17 @@ export default function LiveTrainer() {
           {/* Session Control Buttons */}
           <div className="space-y-3">
             <button
+              onClick={startAutoCapture}
+              disabled={!cameraActive || isCapturing}
+              className={`w-full flex items-center justify-center gap-2 rounded-xl py-3 text-sm font-semibold transition-all shadow-md bg-violet-600 hover:bg-violet-500 text-white ${
+                (!cameraActive || isCapturing) ? 'opacity-50 cursor-not-allowed' : 'glow-accent'
+              }`}
+            >
+              <Camera className="h-4 w-4" />
+              Auto-Capture (5s Timer)
+            </button>
+
+            <button
               onClick={handleStartStop}
               className={`w-full flex items-center justify-center gap-2 rounded-xl py-3 text-sm font-semibold transition-all shadow-md ${
                 isSessionRunning 
@@ -2173,12 +2278,7 @@ export default function LiveTrainer() {
               </button>
               <button
                 onClick={activeFlow ? handleFinishFlowSession : handleFinishSession}
-                disabled={elapsedTime === 0}
-                className={`flex items-center justify-center gap-1.5 rounded-xl py-2.5 text-xs font-semibold transition-all border ${
-                  elapsedTime > 0
-                    ? 'bg-emerald-600/10 border-emerald-500/20 text-emerald-400 hover:bg-emerald-500/20'
-                    : 'bg-slate-950 border-white/5 text-slate-700 cursor-not-allowed'
-                }`}
+                className="flex items-center justify-center gap-1.5 rounded-xl py-2.5 text-xs font-semibold transition-all border bg-emerald-600/10 border-emerald-500/20 text-emerald-400 hover:bg-emerald-500/20"
               >
                 Finish
                 <ArrowRight className="h-3.5 w-3.5" />
@@ -2481,6 +2581,217 @@ export default function LiveTrainer() {
                 className="rounded-xl bg-indigo-600 hover:bg-indigo-500 px-4 py-2 text-xs font-black text-white transition-all shadow-md shadow-indigo-600/10"
               >
                 Got It
+              </button>
+            </div>
+          </Card>
+        </div>
+      )}
+
+      {/* Captured Pose Analysis Modal */}
+      {capturedAnalysis && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-950/80 backdrop-blur-md p-4 animate-fade-in">
+          <Card className="relative w-full max-w-4xl overflow-hidden rounded-3xl border border-indigo-500/25 bg-slate-900/95 p-6 md:p-8 shadow-2xl glow-accent text-left" hover={false}>
+            {/* Close Button */}
+            <button 
+              onClick={() => setCapturedAnalysis(null)}
+              className="absolute top-4 right-4 text-slate-400 hover:text-white transition-colors z-30"
+            >
+              <X className="h-5 w-5" />
+            </button>
+
+            {/* Header */}
+            <div className="flex items-center gap-3 border-b border-white/5 pb-4 mb-6">
+              <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-indigo-500/10 text-indigo-400 border border-indigo-500/20">
+                <Camera className="h-5 w-5" />
+              </div>
+              <div>
+                <h2 className="text-xl font-black text-white">Pose Capture Report</h2>
+                <p className="text-xs text-slate-400 font-light">Comparison analysis with the digital twin model for {capturedAnalysis.poseName}.</p>
+              </div>
+            </div>
+
+            {/* Side-by-Side Visual Comparison Displays */}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
+              {/* Left Side: Captured Photo with Skeleton Overlay */}
+              <div className="space-y-2">
+                <span className="text-[10px] text-slate-500 font-extrabold uppercase tracking-wider block">Your Captured Pose</span>
+                <div className="relative aspect-video rounded-2xl overflow-hidden border border-white/10 bg-slate-950 flex items-center justify-center h-[220px] md:h-[260px]">
+                  {capturedAnalysis.photoUrl ? (
+                    <>
+                      <img src={capturedAnalysis.photoUrl} className="w-full h-full object-cover" alt="Captured pose" />
+                      <svg className="absolute inset-0 w-full h-full pointer-events-none" viewBox="0 0 100 100">
+                        {/* Draw skeleton lines */}
+                        {(() => {
+                          const lms = capturedAnalysis.capturedLandmarks;
+                          if (!lms || lms.length < 33) return null;
+                          
+                          // Helper to get x,y as percentage [0, 100]
+                          const getPt = (idx) => {
+                            const pt = lms[idx];
+                            return pt ? { x: pt.x * 100, y: pt.y * 100 } : { x: 50, y: 50 };
+                          };
+                          
+                          const pts = {
+                            nose: getPt(0),
+                            l_sh: getPt(11),
+                            r_sh: getPt(12),
+                            l_el: getPt(13),
+                            r_el: getPt(14),
+                            l_wr: getPt(15),
+                            r_wr: getPt(16),
+                            l_hip: getPt(23),
+                            r_hip: getPt(24),
+                            l_kn: getPt(25),
+                            r_kn: getPt(26),
+                            l_ank: getPt(27),
+                            r_ank: getPt(28),
+                          };
+                          
+                          return (
+                            <g stroke="#34d399" strokeWidth="1.2" fill="none" strokeLinecap="round">
+                              {/* Shoulders */}
+                              <line x1={pts.l_sh.x} y1={pts.l_sh.y} x2={pts.r_sh.x} y2={pts.r_sh.y} />
+                              {/* Hips */}
+                              <line x1={pts.l_hip.x} y1={pts.l_hip.y} x2={pts.r_hip.x} y2={pts.r_hip.y} />
+                              {/* Left Arm */}
+                              <line x1={pts.l_sh.x} y1={pts.l_sh.y} x2={pts.l_el.x} y2={pts.l_el.y} />
+                              <line x1={pts.l_el.x} y1={pts.l_el.y} x2={pts.l_wr.x} y2={pts.l_wr.y} />
+                              {/* Right Arm */}
+                              <line x1={pts.r_sh.x} y1={pts.r_sh.y} x2={pts.r_el.x} y2={pts.r_el.y} />
+                              <line x1={pts.r_el.x} y1={pts.r_el.y} x2={pts.r_wr.x} y2={pts.r_wr.y} />
+                              {/* Left Leg */}
+                              <line x1={pts.l_hip.x} y1={pts.l_hip.y} x2={pts.l_kn.x} y2={pts.l_kn.y} />
+                              <line x1={pts.l_kn.x} y1={pts.l_kn.y} x2={pts.l_ank.x} y2={pts.l_ank.y} />
+                              {/* Right Leg */}
+                              <line x1={pts.r_hip.x} y1={pts.r_hip.y} x2={pts.r_kn.x} y2={pts.r_kn.y} />
+                              <line x1={pts.r_kn.x} y1={pts.r_kn.y} x2={pts.r_ank.x} y2={pts.r_ank.y} />
+                              
+                              {/* Connect shoulders and hips midpoint for spine */}
+                              <line 
+                                x1={(pts.l_sh.x + pts.r_sh.x) / 2} 
+                                y1={(pts.l_sh.y + pts.r_sh.y) / 2} 
+                                x2={(pts.l_hip.x + pts.r_hip.x) / 2} 
+                                y2={(pts.l_hip.y + pts.r_hip.y) / 2} 
+                                stroke="#818cf8"
+                              />
+                              
+                              {/* Joints */}
+                              {Object.keys(pts).map((key) => (
+                                <circle key={key} cx={pts[key].x} cy={pts[key].y} r="1.2" fill="#ffffff" stroke="#4f46e5" strokeWidth="0.4" />
+                              ))}
+                            </g>
+                          );
+                        })()}
+                      </svg>
+                    </>
+                  ) : (
+                    <div className="text-center p-4">
+                      <CameraOff className="h-8 w-8 text-slate-600 mx-auto mb-2" />
+                      <span className="text-xs text-slate-500 font-light">No camera image captured</span>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/* Right Side: 3D Digital Twin Model */}
+              <div className="space-y-2">
+                <span className="text-[10px] text-slate-500 font-extrabold uppercase tracking-wider block">AI 3D Digital Twin Target</span>
+                <div className="relative aspect-video rounded-2xl overflow-hidden border border-white/10 bg-[#070b13] flex items-center justify-center h-[220px] md:h-[260px]">
+                  <YogaDigitalTwin 
+                    poseId={currentPose.id === 'auto-detect' ? (detectedPose?.id || 'warrior-ii') : currentPose.id} 
+                    jointOffsets={capturedAnalysis.jointDetails ? 
+                      Object.keys(capturedAnalysis.jointDetails).reduce((acc, key) => {
+                        acc[key] = capturedAnalysis.jointDetails[key].deviation;
+                        return acc;
+                      }, {}) : null
+                    }
+                    showUserTwin={true} 
+                  />
+                  <div className="absolute bottom-2 left-2 z-10 flex items-center gap-1.5 rounded-full bg-[#05070f]/80 border border-white/10 px-2.5 py-0.5 text-[8px] font-bold text-slate-300">
+                    <span>3D Rig View</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Content HUD Info Grid */}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+              {/* Left Column: Core Stats */}
+              <div className="space-y-4">
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="bg-slate-950/40 border border-white/5 rounded-2xl p-4 text-center">
+                    <span className="text-[10px] text-slate-500 font-extrabold uppercase tracking-wider block">Accuracy Score</span>
+                    <div className="text-4xl font-black bg-gradient-to-r from-emerald-400 to-indigo-400 bg-clip-text text-transparent mt-1 leading-none">
+                      {capturedAnalysis.accuracy}%
+                    </div>
+                    <span className={`inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-[9px] font-bold mt-2 border ${
+                      capturedAnalysis.accuracy >= 90 
+                        ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20' 
+                        : capturedAnalysis.accuracy >= 75 
+                          ? 'bg-indigo-500/10 text-indigo-400 border-indigo-500/20' 
+                          : 'bg-amber-500/10 text-amber-400 border-amber-500/20'
+                    }`}>
+                      {capturedAnalysis.accuracy >= 90 ? 'Master' : capturedAnalysis.accuracy >= 75 ? 'Practitioner' : 'Apprentice'}
+                    </span>
+                  </div>
+
+                  <div className="bg-slate-950/40 border border-white/5 rounded-2xl p-4 flex flex-col justify-center items-center text-center">
+                    <span className="text-[10px] text-slate-500 font-extrabold uppercase tracking-wider block">Camera Tilt</span>
+                    <div className="text-3xl font-black text-indigo-400 mt-1 leading-none">
+                      {capturedAnalysis.tiltAngle !== undefined ? `${capturedAnalysis.tiltAngle}°` : '0°'}
+                    </div>
+                    <span className="text-[9px] text-slate-500 font-light mt-2">Perspective Pitch</span>
+                  </div>
+                </div>
+
+                <div className="bg-slate-950/40 border border-white/5 rounded-2xl p-4">
+                  <span className="text-[10px] text-slate-500 font-extrabold uppercase tracking-wider block mb-1">AI Coaching Feedback</span>
+                  <p className="text-xs text-slate-300 font-light leading-relaxed">
+                    {capturedAnalysis.feedback}
+                  </p>
+                </div>
+              </div>
+
+              {/* Right Column: Joint Comparison Table */}
+              <div className="space-y-4">
+                <div className="bg-slate-950/40 border border-white/5 rounded-2xl p-4 h-[180px] overflow-y-auto scrollbar-thin scrollbar-track-transparent scrollbar-thumb-indigo-500/20">
+                  <span className="text-[10px] text-slate-500 font-extrabold uppercase tracking-wider block mb-3">Biomechanical Joints Compare</span>
+                  {capturedAnalysis.jointDetails && Object.keys(capturedAnalysis.jointDetails).length > 0 ? (
+                    <div className="space-y-2.5">
+                      {Object.entries(capturedAnalysis.jointDetails).map(([joint, detail]) => (
+                        <div key={joint} className="flex items-center justify-between border-b border-white/5 pb-1.5 last:border-0 last:pb-0">
+                          <div>
+                            <span className="text-xs font-bold text-slate-200 block">{getJointLabel(joint)}</span>
+                            <span className="text-[9px] text-slate-500">Target: {Math.round(detail.target)}° | Actual: {Math.round(detail.actual)}°</span>
+                          </div>
+                          <span className={`text-[10px] font-black px-2 py-0.5 rounded-md ${
+                            detail.deviation <= 5 
+                              ? 'bg-emerald-500/10 text-emerald-400' 
+                              : detail.deviation <= 15 
+                                ? 'bg-amber-500/10 text-amber-400' 
+                                : 'bg-rose-500/10 text-rose-400'
+                          }`}>
+                            Diff: {Math.round(detail.deviation)}°
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="h-full flex items-center justify-center text-xs text-slate-500">
+                      No joint detail offsets available.
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            {/* Footer Buttons */}
+            <div className="flex justify-end gap-3 border-t border-white/5 pt-4 mt-6">
+              <button
+                onClick={() => setCapturedAnalysis(null)}
+                className="rounded-xl bg-indigo-600 hover:bg-indigo-500 px-5 py-2.5 text-xs font-semibold text-white shadow-md shadow-indigo-600/10 transition-all"
+              >
+                Close Report
               </button>
             </div>
           </Card>

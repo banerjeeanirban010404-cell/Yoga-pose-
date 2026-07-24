@@ -11,6 +11,7 @@ class PoseCalibrator:
         self.collected_normals: List[Tuple[float, float, float]] = []
         self.rotation_matrix: Optional[List[List[float]]] = None
         self.calibrated = False
+        self.attempts = 0
 
     def add_frame(self, landmarks: List[Dict[str, float]]) -> Tuple[bool, str]:
         """
@@ -20,19 +21,21 @@ class PoseCalibrator:
         if self.calibrated:
             return True, "Calibration complete."
 
+        self.attempts += 1
+
         if not landmarks or len(landmarks) < 33:
-            return False, "No person detected. Position your full body in the camera frame."
+            return self._check_attempts_fallback("No person detected. Position your full body in the camera frame.")
 
         # Check visibility of key skeletal landmarks to ensure full body is in frame
         key_landmarks = [11, 12, 23, 24, 25, 26, 27, 28] # shoulders, hips, knees, ankles
-        low_visibility_count = sum(1 for idx in key_landmarks if landmarks[idx].get('visibility', 1.0) < 0.55)
-        if low_visibility_count > 2:
-            return False, "Calibration paused: Position your full body in the camera frame."
+        low_visibility_count = sum(1 for idx in key_landmarks if landmarks[idx].get('visibility', 1.0) < 0.35)
+        if low_visibility_count > 4:
+            return self._check_attempts_fallback("Calibration paused: Position your full body in the camera frame.")
 
         # Verify visibility of the feet landmarks specifically
         feet_indices = [27, 28, 29, 30, 31, 32]
-        if any(landmarks[idx].get('visibility', 1.0) < 0.50 for idx in feet_indices):
-            return False, "Calibration paused: Adjust camera so your feet are fully visible."
+        if any(landmarks[idx].get('visibility', 1.0) < 0.30 for idx in feet_indices):
+            return self._check_attempts_fallback("Calibration paused: Adjust camera so your feet are fully visible.")
 
         try:
             l_ank = landmarks[27]
@@ -43,19 +46,17 @@ class PoseCalibrator:
             r_toe = landmarks[32]
 
             # Levelness check: Verify left and right heels are flat/level on the floor
-            # A vertical difference greater than 0.06 indicates a single-leg or transition pose
-            if abs(l_heel['y'] - r_heel['y']) > 0.06:
-                return False, "Calibration paused: Place both feet flat on the floor."
+            # A vertical difference greater than 0.15 indicates a single-leg or transition pose
+            if abs(l_heel['y'] - r_heel['y']) > 0.15:
+                return self._check_attempts_fallback("Calibration paused: Place both feet flat on the floor.")
 
-            # Posture check: Verify the user is standing upright (hips above knees, knees above ankles)
+            # Posture check: Verify the user is standing upright (hips above ankles)
             l_hip = landmarks[23]
             r_hip = landmarks[24]
-            l_knee = landmarks[25]
-            r_knee = landmarks[26]
 
             # In MediaPipe's coordinates, +y is downwards, so smaller y = higher position
-            if not (l_hip['y'] < l_knee['y'] < l_ank['y']) or not (r_hip['y'] < r_knee['y'] < r_ank['y']):
-                return False, "Calibration paused: Stand upright with both feet flat."
+            if not (l_hip['y'] < l_ank['y']) or not (r_hip['y'] < r_ank['y']):
+                return self._check_attempts_fallback("Calibration paused: Stand upright with both feet flat.")
 
             # 1. Lateral vector (left to right across the heels)
             v_lat = (
@@ -96,10 +97,10 @@ class PoseCalibrator:
                     
                 self.collected_normals.append(u_normal)
             else:
-                return False, "Calibration paused: Noisy ground signals. Stand still."
+                return self._check_attempts_fallback("Calibration paused: Noisy ground signals. Stand still.")
 
         except (KeyError, IndexError, ZeroDivisionError):
-            return False, "Calibration paused: Sensor noise detected. Stand still."
+            return self._check_attempts_fallback("Calibration paused: Sensor noise detected. Stand still.")
 
         collected = len(self.collected_normals)
         required = self.required_frames
@@ -109,6 +110,19 @@ class PoseCalibrator:
             return True, "Calibration complete!"
 
         return False, f"Calibrating camera... Stand still in full frame ({collected}/{required})."
+
+    def _check_attempts_fallback(self, original_message: str) -> Tuple[bool, str]:
+        """Check if we have timed out / exceeded attempts, and fall back to default calibration."""
+        if self.attempts >= 40:
+            if self.collected_normals:
+                self._compute_calibration_matrix()
+                self.calibrated = True
+                return True, "Calibration complete (partial calibration matrix)."
+            else:
+                self.rotation_matrix = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
+                self.calibrated = True
+                return True, "Calibration complete (default grid fallback)."
+        return False, original_message
 
     def _compute_calibration_matrix(self):
         """
